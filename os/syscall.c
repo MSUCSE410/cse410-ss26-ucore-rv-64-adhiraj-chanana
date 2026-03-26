@@ -4,6 +4,7 @@
 #include "syscall_ids.h"
 #include "timer.h"
 #include "trap.h"
+#include "vm.h"
 
 uint64 sys_write(int fd, uint64 va, uint len)
 {
@@ -32,26 +33,111 @@ uint64 sys_sched_yield()
 	return 0;
 }
 
-uint64 sys_gettimeofday(TimeVal *val, int _tz) // TODO: implement sys_gettimeofday in pagetable. (VA to PA)
+uint64 sys_gettimeofday(TimeVal *val, int _tz)
 {
-	// YOUR CODE
-	val->sec = 0;
-	val->usec = 0;
-
-	/* The code in `ch3` will leads to memory bugs*/
-
-	// uint64 cycle = get_cycle();
-	// val->sec = cycle / CPU_FREQ;
-	// val->usec = (cycle % CPU_FREQ) * 1000000 / CPU_FREQ;
-	return 0;
+    uint64 phys_addr = useraddr(curr_proc()->pagetable, (uint64)val);
+    if (phys_addr == 0) {
+        return -1;  
+    }
+    
+    TimeVal *phys_val = (TimeVal *)phys_addr;
+    
+    
+    uint64 cycle = get_cycle();
+    phys_val->sec = cycle / CPU_FREQ;
+    phys_val->usec = (cycle % CPU_FREQ) * 1000000 / CPU_FREQ;
+    
+    return 0;
 }
 
 // TODO: add support for mmap and munmap syscall.
 // hint: read through docstrings in vm.c. Watching CH4 video may also help.
 // Note the return value and PTE flags (especially U,X,W,R)
+// TODO: add support for mmap and munmap syscall.
+// hint: read through docstrings in vm.c. Watching CH4 video may also help.
+// Note the return value and PTE flags (especially U,X,W,R)
+
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd)
+{
+    if (len == 0) return 0;
+
+    if ((port & ~0x7) != 0) return -1; 
+    if ((port & 0x7) == 0)  return -1;
+    if (start == 0 || start % PGSIZE != 0) return -1;
+    if (len > 1024ULL * 1024 * 1024) return -1;
+
+    struct proc *p = curr_proc();
+    len = PGROUNDUP(len);
+
+    //check if page is mapped
+    for (uint64 addr = start; addr < start + len; addr += PGSIZE) {
+        if (walkaddr(p->pagetable, addr) != 0) {
+            return -1;
+        }
+    }
+
+    int pte_flags = PTE_U; // user port
+    if (port & 1) pte_flags |= PTE_R;
+    if (port & 2) pte_flags |= PTE_W;
+    if (port & 4) pte_flags |= PTE_X;
+
+    for (uint64 addr = start; addr < start + len; addr += PGSIZE) {
+        void *pa = kalloc();
+        if (pa == 0) return -1;
+        memset(pa, 0, PGSIZE);
+        if (mappages(p->pagetable, addr, PGSIZE, (uint64)pa, pte_flags) != 0) {
+            kfree(pa);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+uint64 sys_munmap(uint64 start, uint64 len)
+{
+    if (len == 0) return 0;
+    if (start % PGSIZE != 0) return -1;
+
+    struct proc *p = curr_proc();
+    len = PGROUNDUP(len);
+    uint64 npages = len / PGSIZE;
+
+    // Check every page mapped
+    for (uint64 addr = start; addr < start + len; addr += PGSIZE) {
+        if (walkaddr(p->pagetable, addr) == 0) {
+            return -1;  
+        }
+    }
+
+    uvmunmap(p->pagetable, start, npages, 1);
+    return 0;
+}
 /*
 * LAB1: you may need to define sys_task_info here
 */
+int sys_task_info(struct TaskInfo *ti)
+{
+    struct proc *p = curr_proc();
+    
+    uint64 phys_addr = useraddr(p->pagetable, (uint64)ti);
+    if (phys_addr == 0) {
+        return -1;  // Invalid address
+    }
+    
+    struct TaskInfo *phys_ti = (struct TaskInfo *)phys_addr;
+    
+    phys_ti->status = TaskStatusRunning;
+    
+    for (int i = 0; i < MAX_SYSCALL_NUM; i++) {
+        phys_ti->syscall_times[i] = p->syscall_times[i];
+    }
+    
+    uint64 current_time = get_cycle() / (CPU_FREQ / 1000);
+    phys_ti->time = (int)(current_time - p->start_time);
+    
+    return 0;
+}
 
 extern char trap_page[];
 
@@ -66,6 +152,9 @@ void syscall()
 	/*
 	* LAB1: you may need to update syscall counter for task info here
 	*/
+	if (id >= 0 && id < MAX_SYSCALL_NUM) {
+    curr_proc()->syscall_times[id]++;
+	}
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], args[1], args[2]);
@@ -82,6 +171,15 @@ void syscall()
 	/*
 	* LAB1: you may need to add SYS_taskinfo case here
 	*/
+	case SYS_task_info:
+    ret = sys_task_info((struct TaskInfo *)args[0]);
+    break;
+	case SYS_mmap:
+    ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+    break;
+	case SYS_munmap:
+    ret = sys_munmap(args[0], args[1]);
+    break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
