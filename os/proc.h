@@ -3,9 +3,17 @@
 
 #include "riscv.h"
 #include "types.h"
+#include "queue.h"
 
 #define NPROC (512)
 #define FD_BUFFER_SIZE (16)
+#define MAX_SYSCALL_NUM (500)
+#define DEFAULT_PRIORITY 16
+#define BIG_STRIDE 0x7FFFFFFF 
+
+typedef enum {
+    TaskStatusRunning = 2,
+} TaskStatus;
 
 struct file;
 
@@ -31,6 +39,12 @@ struct context {
 
 enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+struct TaskInfo {
+    TaskStatus status;
+    unsigned int syscall_times[MAX_SYSCALL_NUM];
+    int time;
+};
+
 // Per-process state
 struct proc {
 	enum procstate state; // Process state
@@ -43,8 +57,12 @@ struct proc {
 	uint64 max_page;
 	struct proc *parent; // Parent process
 	uint64 exit_code;
-	struct file *files
-		[FD_BUFFER_SIZE]; //File descriptor table, using to record the files opened by the process
+	struct file *files[FD_BUFFER_SIZE]; // File descriptor table
+	uint64 start_time;                  // Chapter 3: Process start time
+	unsigned int syscall_times[MAX_SYSCALL_NUM]; // Chapter 3: Syscall tracking
+	int priority;     // Chapter 5: Process priority
+    uint64 stride;    // Chapter 5: Current stride value 
+    uint64 pass;      // Chapter 5: Pass value 
 };
 
 int cpuid();
@@ -55,14 +73,14 @@ void scheduler() __attribute__((noreturn));
 void sched();
 void yield();
 int fork();
-int exec(char *, char **);
+int exec(char *, char **);  // Chapter 6: Updated exec with argv support
 int wait(int, int *);
 void add_task(struct proc *);
 struct proc *pop_task();
 struct proc *allocproc();
-int fdalloc(struct file *);
-int init_stdio(struct proc *);
-int push_argv(struct proc *, char **);
+int fdalloc(struct file *);        // Chapter 6: File descriptor allocation
+int init_stdio(struct proc *);     // Chapter 6: Initialize stdio
+int push_argv(struct proc *, char **); // Chapter 6: Argument handling
 // swtch.S
 void swtch(struct context *, struct context *);
 
