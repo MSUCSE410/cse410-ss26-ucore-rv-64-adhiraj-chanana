@@ -17,8 +17,8 @@ struct inode {
 
     short type;
     short nlink;     // match disk
-    short major;     // now acts like pad
-    short minor;     // now acts like pad
+    short major;    
+    short minor;     
 
     uint size;
     uint addrs[NDIRECT+1];

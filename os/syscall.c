@@ -309,6 +309,7 @@ int sys_linkat(int olddirfd, uint64 oldpath, int newdirfd, uint64 newpath, uint6
 {
 	struct proc *p = curr_proc();
 	char oldname[200], newname[200];
+	// copy file name from userSpace to kernel space
 	copyinstr(p->pagetable, oldname, oldpath, 200);
 	copyinstr(p->pagetable, newname, newpath, 200);
 
@@ -372,7 +373,7 @@ int sys_unlinkat(int dirfd, uint64 name, uint64 flags)
 	ip->nlink--;
 
 	if (ip->nlink == 0) {
-		itrunc(ip);   // 🔥 frees blocks immediately
+		itrunc(ip);   
 	}
 
 	iupdate(ip);
@@ -399,10 +400,9 @@ int sys_fstat(int fd, uint64 stat)
 	ivalid(f->ip);
 
 	// Build the Stat struct and copy to user space
-	// struct Stat { uint64 dev, uint64 ino, uint32 mode, uint32 nlink, uint64 pad[7] }
-	uint64 st_dev   = 0;
-	uint64 st_ino   = f->ip->inum;
-	uint32 st_mode  = (f->ip->type == T_DIR) ? 0x040000 : 0x100000;
+	uint64 st_dev   = 0;  
+	uint64 st_ino   = f->ip->inum; //inode numbertifier
+	uint32 st_mode  = (f->ip->type == T_DIR) ? 0x040000 : 0x100000; //type
 	uint32 st_nlink = f->ip->nlink;
 
 	copyout(p->pagetable, stat,                    (char *)&st_dev,   sizeof(uint64));
