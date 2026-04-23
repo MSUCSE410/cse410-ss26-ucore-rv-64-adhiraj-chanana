@@ -5,6 +5,12 @@
 #include "syscall_ids.h"
 #include "timer.h"
 #include "trap.h"
+#include "vm.h"
+
+void freeproc(struct proc *p);
+struct proc *allocproc(void);
+struct proc *curr_proc(void);
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd);
 
 uint64 sys_write(int fd, uint64 va, uint len)
 {
@@ -47,9 +53,78 @@ uint64 sys_sched_yield()
 	yield();
 	return 0;
 }
+uint64 sys_mmap(uint64 start, uint64 len, int port, int flag, int fd)
+{
+    if (len == 0) return start;  // Return start address for 0-length requests
+
+    if ((port & ~0x7) != 0) return -1; 
+    if ((port & 0x7) == 0)  return -1;
+    if (len > 1024ULL * 1024 * 1024) return -1;
+
+    struct proc *p = curr_proc();
+    len = PGROUNDUP(len);
+
+    // If start is 0, choose a suitable address
+    if (start == 0) {
+        start = 0x60000000;  // Choose a reasonable virtual address
+    }
+
+    // Ensure start is page-aligned
+    if (start % PGSIZE != 0) return -1;
+
+    //check if page is mapped
+    for (uint64 addr = start; addr < start + len; addr += PGSIZE) {
+        if (walkaddr(p->pagetable, addr) != 0) {
+            return -1;
+        }
+    }
+
+    int pte_flags = PTE_U; // user port
+    if (port & 1) pte_flags |= PTE_R;
+    if (port & 2) pte_flags |= PTE_W;
+    if (port & 4) pte_flags |= PTE_X;
+
+    for (uint64 addr = start; addr < start + len; addr += PGSIZE) {
+        void *pa = kalloc();
+        if (pa == 0) return -1;
+        memset(pa, 0, PGSIZE);
+        if (mappages(p->pagetable, addr, PGSIZE, (uint64)pa, pte_flags) != 0) {
+            kfree(pa);
+            return -1;
+        }
+    }
+
+    return start; 
+}
+
+uint64 sys_munmap(uint64 start, uint64 len)
+{
+    if (len == 0) return 0;
+    if (start % PGSIZE != 0) return -1;
+
+    struct proc *p = curr_proc();
+    len = PGROUNDUP(len);
+    uint64 npages = len / PGSIZE;
+
+    // Check every page mapped
+    for (uint64 addr = start; addr < start + len; addr += PGSIZE) {
+        if (walkaddr(p->pagetable, addr) == 0) {
+            return -1;  
+        }
+    }
+
+    uvmunmap(p->pagetable, start, npages, 1);
+    return 0;
+}
 
 uint64 sys_gettimeofday(uint64 val, int _tz)
 {
+    uint64 phys_addr = useraddr(curr_proc()->pagetable, (uint64)val);
+    if (phys_addr == 0) {
+        return -1;  
+    }
+    
+    //TimeVal *phys_val = (TimeVal *)phys_addr;
 	struct proc *p = curr_proc();
 	uint64 cycle = get_cycle();
 	TimeVal t;
@@ -92,15 +167,68 @@ uint64 sys_wait(int pid, uint64 va)
 	return wait(pid, code);
 }
 
+int sys_task_info(struct TaskInfo *ti)
+{
+    struct proc *p = curr_proc();
+    
+    uint64 phys_addr = useraddr(p->pagetable, (uint64)ti);
+    if (phys_addr == 0) {
+        return -1;  // Invalid address
+    }
+    
+    struct TaskInfo *phys_ti = (struct TaskInfo *)phys_addr;
+    
+    phys_ti->status = TaskStatusRunning;
+    
+    for (int i = 0; i < MAX_SYSCALL_NUM; i++) {
+        phys_ti->syscall_times[i] = p->syscall_times[i];
+    }
+    
+    uint64 current_time = get_cycle() / (CPU_FREQ / 1000);
+    phys_ti->time = (int)(current_time - p->start_time);
+    
+    return 0;
+}
 uint64 sys_spawn(uint64 va)
 {
-	// TODO: your job is to complete the sys call
-	return -1;
+    struct proc *p = curr_proc();
+    char name[200];
+    copyinstr(p->pagetable, name, va, 200);
+    
+    // Create new process
+    struct proc *np = allocproc();
+    if (np == 0) {
+        return -1;  // Process allocation failed
+    }
+    
+    // Set up new process
+    np->parent = p;
+    np->state = USED;
+    
+    // Load program
+    int id = get_id_by_name(name);
+    if (id < 0) {
+        freeproc(np);
+        return -1;  // Invalid program name
+    }
+    
+    loader(id, np);
+    np->state = RUNNABLE;
+    
+    return np->pid;
 }
 
-uint64 sys_set_priority(long long prio){
-    // TODO: your job is to complete the sys call
-    return -1;
+uint64 sys_set_priority(long long prio)
+{
+    if (prio < 2) {
+        return -1;  // Priority must be >= 2
+    }
+    
+    struct proc *p = curr_proc();
+    p->priority = (int)prio;
+    p->pass = BIG_STRIDE / p->priority;  // Recalculate pass value
+    
+    return prio;
 }
 
 
@@ -114,6 +242,9 @@ void syscall()
 			   trapframe->a3, trapframe->a4, trapframe->a5 };
 	tracef("syscall %d args = [%x, %x, %x, %x, %x, %x]", id, args[0],
 	       args[1], args[2], args[3], args[4], args[5]);
+    if (id >= 0 && id < MAX_SYSCALL_NUM) {
+    curr_proc()->syscall_times[id]++;
+	}
 	switch (id) {
 	case SYS_write:
 		ret = sys_write(args[0], args[1], args[2]);
@@ -133,6 +264,9 @@ void syscall()
 	case SYS_getpid:
 		ret = sys_getpid();
 		break;
+    case SYS_task_info:
+    ret = sys_task_info((struct TaskInfo *)args[0]);
+    break;
 	case SYS_getppid:
 		ret = sys_getppid();
 		break;
@@ -148,6 +282,18 @@ void syscall()
 	case SYS_spawn:
 		ret = sys_spawn(args[0]);
 		break;
+    case SYS_mmap:
+    ret = sys_mmap(args[0], args[1], args[2], args[3], args[4]);
+    break;
+	case SYS_munmap:
+    ret = sys_munmap(args[0], args[1]);
+    break;
+    // case SYS_spawn:
+    // ret = sys_spawn(args[0]);
+    // break;
+    case SYS_setpriority:
+    ret = sys_set_priority(args[0]);
+    break;
 	default:
 		ret = -1;
 		errorf("unknown syscall %d", id);
